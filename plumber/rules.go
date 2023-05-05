@@ -429,22 +429,67 @@ func (in *Input) readruleset() (*Ruleset, error) {
 	}
 }
 
-func readrules(name string, fd io.Reader) ([]*Ruleset, error) {
+func (rules *Rules)readrules(name string, fd io.Reader) (error) {
 	var in Input
-	rules := []*Ruleset{}
 
 	in.pushinput(name, fd)
 	for {
 		rs, err := in.readruleset()
 		if err == io.EOF || rs == nil {
-			return rules, nil
+			return nil
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
-		rules = append(rules, rs)
+		*rules = append(*rules, rs)
 	}
 	in.popinput()
 
-	return rules, nil
+	return nil
 }
+
+func (r Rule)String() string {
+	return fmt.Sprintf("%s\t%s\t%s\n", objectNames[r.obj], verbNames[r.verb], r.arg)
+}
+
+func (v Var)String() string {
+	return fmt.Sprintf( "%s=%s\n\n", v.name, v.value)
+}
+
+func (r Ruleset)String() string {
+	sb := strings.Builder{}
+	for _, p := range r.pat {
+		sb.WriteString(p.String())
+	}
+	for _, a := range r.act {
+		sb.WriteString(a.String())
+	}
+	sb.WriteRune('\n')
+	return sb.String()
+}
+
+func printport(port string) string {
+	return fmt.Sprintf("plumb to %s\n", port)
+}
+
+func (rules Rules)String() string {
+	sb := strings.Builder{}
+	for _, v := range vars {
+		sb.WriteString(v.String())
+	}
+	for _, p := range ports {
+		sb.WriteString(p)
+	}
+	sb.WriteRune('\n')
+	for _, r := range rules {
+		sb.WriteString(r.String())
+	}
+	return sb.String()
+}
+
+func (r *Rules)morerules(text string) error {
+	// TODO(PAL): some complicated(?) handling for returning errors early?
+	// The original appears to add them one rule at a time. 
+	return r.readrules("<rules input>", strings.NewReader(text))
+}
+

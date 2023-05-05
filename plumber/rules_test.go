@@ -22,7 +22,7 @@ func TestExpand(t *testing.T) {
 	}
 
 	e := &Exec{
-		msg: plumb.Msg{
+		msg: &plumb.Msg{
 			Src:   "source",
 			Dst:   "destination",
 			Wdir:  "/tmp",
@@ -53,7 +53,8 @@ twocolonaddr = ([0-9]+)[:.]([0-9]+)
 func TestReadRules(t *testing.T) {
 	r := strings.NewReader(fileaddr)
 
-	rules, err := readrules("fileaddr", r)
+	rules := newRules()
+	err := rules.readrules("fileaddr", r)
 	if err != nil {
 		t.Errorf("Failed to read fileaddr: %v", err)
 	}
@@ -65,7 +66,8 @@ func TestReadRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open test data")
 	}
-	rules, err = readrules("basic", bf)
+	rules = newRules()
+	err = rules.readrules("basic", bf)
 	if err != nil {
 		t.Errorf("Failed to read fileaddr: %v", err)
 	}

@@ -23,13 +23,13 @@ func main() {
 	if err != nil {
 		errorf("can't open rules file %s: %v", plumbfile, err)
 	}
-
-	rules, err := readrules(*plumbfile, f)
+	
+	rules := newRules()
+	err = rules.readrules(*plumbfile, f)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
 	////////
-	_ = rules
 	f.Close()
 	//startfsys(/*rules*/)
 

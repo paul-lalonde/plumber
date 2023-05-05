@@ -42,6 +42,11 @@ type Rule struct {
 	regex *regexp.Regexp
 }
 
+type Rules []*Ruleset
+func newRules() Rules {
+	return []*Ruleset{}
+}
+
 type Ruleset struct {
 	pat  []Rule
 	act  []Rule
@@ -49,9 +54,10 @@ type Ruleset struct {
 }
 
 type Exec struct {
-	msg           plumb.Msg
+	msg           *plumb.Msg
 	match         [10]string
-	p0, p1        string
+	text		string
+	p0, p1        int
 	clearclick    bool
 	setdata       bool
 	holdforclient bool
