@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestExpand(t *testing.T) {
 			Dst:   "destination",
 			Wdir:  "/tmp",
 			Typ:   "type",
-			Attr:  []plumb.Attr{{"name", "value"}},
+			Attr:  []plumb.Attr{{Name: "name", Value: "value"}},
 			Ndata: 5,
 			Data:  "hello",
 		},
@@ -58,7 +59,7 @@ func TestReadRules(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to read fileaddr: %v", err)
 	}
-	if len(rules) > 0 {
+	if len(rules.rs) > 0 {
 		t.Errorf("fileaddr should not have made any rules")
 	}
 
@@ -71,8 +72,29 @@ func TestReadRules(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to read fileaddr: %v", err)
 	}
-	if len(rules) < 1 {
+	if len(rules.rs) < 1 {
 		t.Errorf("basic should declare some rules")
 	}
+	bf.Close()
 
+	bf, err = os.Open("../testdata/basic")
+	if err != nil {
+		t.Fatalf("Failed to open test data")
+	}
+	fsys := NewFsys()
+	data, err := io.ReadAll(bf)
+	if err != nil {
+		t.Fatalf("Failed to read test data")
+	}
+	err = fsys.writerules(data)
+	if err != nil {
+		t.Fatalf("Failed to add rules")
+	}
+	for fsys.text != nil { // Gross.  But in the test the last item is fully formed.
+		fsys.writerules(nil)
+	}
+
+	if len(fsys.rules.rs) != len(rules.rs) {
+		t.Errorf("writerules didn't add the same rules as readrules")
+	}
 }

@@ -11,9 +11,9 @@ import (
 	"github.com/paul-lalonde/plumb"
 )
 
-func (e *Exec)verbis(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbis(obj Object, m *plumb.Msg, r *Rule) bool {
 	switch obj {
-	default: 
+	default:
 		errorf("unimplemented 'is' object %d\n", obj)
 	case OData:
 		return m.Data == r.qarg
@@ -52,7 +52,7 @@ func clickmatch(re *regexp.Regexp, text string, clickoffset int) (ri []int, rs [
 	return nil, nil
 }
 
-func (e *Exec)setvar(rs []string) {
+func (e *Exec) setvar(rs []string) {
 	for i := 0; i < len(e.match); i++ {
 		if len(rs) > i {
 			e.match[i] = rs[i]
@@ -62,23 +62,26 @@ func (e *Exec)setvar(rs []string) {
 	}
 }
 
-func (e *Exec)verbmatches(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbmatches(obj Object, m *plumb.Msg, r *Rule) bool {
 	text := ""
 	switch obj {
-	default: errorf("unimplemented 'matches' object %d\n", obj)
+	default:
+		errorf("unimplemented 'matches' object %d\n", obj)
 	case OData:
 		clickval := m.Lookup("click")
 		if clickval == "" {
 			text = m.Data
 		} else {
 			cval, err := strconv.Atoi(clickval)
-			if err != nil { errorf("error parsing clickval (%v), using 0", clickval) }
+			if err != nil {
+				errorf("error parsing clickval (%v), using 0", clickval)
+			}
 			ri, rs := clickmatch(r.regex, m.Data, cval)
 			if ri == nil {
 				return false
 			}
 			p0, p1 := int(ri[0]), int(ri[1])
-			if e.p0 >= 0 && !(p0==e.p0 && p1 == e.p1) {
+			if e.p0 >= 0 && !(p0 == e.p0 && p1 == e.p1) {
 				return false
 			}
 			e.clearclick = true
@@ -95,7 +98,7 @@ func (e *Exec)verbmatches(obj Object, m *plumb.Msg, r *Rule) bool {
 	case OWdir:
 		text = m.Wdir
 	case OSrc:
-		text = m.Src	
+		text = m.Src
 	}
 	/* must match full text */
 
@@ -105,7 +108,7 @@ func (e *Exec)verbmatches(obj Object, m *plumb.Msg, r *Rule) bool {
 		rs := r.regex.FindStringSubmatch(text)
 		e.setvar(rs)
 		return true
-	}	
+	}
 }
 
 func isfile(file string, maskon uint32, maskoff uint32) bool {
@@ -115,9 +118,9 @@ func isfile(file string, maskon uint32, maskoff uint32) bool {
 	}
 
 	mode := uint32(fi.Mode())
-	if ((mode & maskon) == 0) {
+	if (mode & maskon) == 0 {
 		return false
-	} 
+	}
 	if (mode & maskoff) != 0 {
 		return false
 	}
@@ -132,7 +135,7 @@ func absolute(dir, file string) string {
 	return filepath.Clean(path)
 }
 
-func (e *Exec)verbisfile(obj Object, m *plumb.Msg, r *Rule, maskon, maskoff uint32) (string, bool) {
+func (e *Exec) verbisfile(obj Object, m *plumb.Msg, r *Rule, maskon, maskoff uint32) (string, bool) {
 	file := ""
 	switch obj {
 	default:
@@ -156,7 +159,7 @@ func (e *Exec)verbisfile(obj Object, m *plumb.Msg, r *Rule, maskon, maskoff uint
 	return "", false
 }
 
-func (e *Exec)verbset(obj Object, m  *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbset(obj Object, m *plumb.Msg, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'set' object %d", obj)
@@ -182,7 +185,7 @@ func (e *Exec)verbset(obj Object, m  *plumb.Msg, r *Rule) bool {
 	}
 }
 
-func (e *Exec)verbadd(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbadd(obj Object, m *plumb.Msg, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'add' object %d", obj)
@@ -193,7 +196,7 @@ func (e *Exec)verbadd(obj Object, m *plumb.Msg, r *Rule) bool {
 	}
 }
 
-func (e *Exec)verbdelete(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbdelete(obj Object, m *plumb.Msg, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'delete' object %d", obj)
@@ -204,10 +207,10 @@ func (e *Exec)verbdelete(obj Object, m *plumb.Msg, r *Rule) bool {
 	}
 }
 
-func (e *Exec)matchpat(m *plumb.Msg, r *Rule) bool {
+func (e *Exec) matchpat(m *plumb.Msg, r *Rule) bool {
 	switch r.verb {
 	default:
-		errorf("unimplemented verb %d\n", r.verb);
+		errorf("unimplemented verb %d\n", r.verb)
 		return false
 	case VAdd:
 		return e.verbadd(r.obj, m, r)
@@ -230,12 +233,12 @@ func (e *Exec)matchpat(m *plumb.Msg, r *Rule) bool {
 	case VMatches:
 		return e.verbmatches(r.obj, m, r)
 	case VSet:
-		e.verbset(r.obj, m, r);
+		e.verbset(r.obj, m, r)
 		return true
 	}
 }
 
-func (e *Exec)rewrite(m *plumb.Msg) {
+func (e *Exec) rewrite(m *plumb.Msg) {
 	if e.clearclick {
 		m.Delattr("click")
 		if e.setdata {
@@ -244,7 +247,7 @@ func (e *Exec)rewrite(m *plumb.Msg) {
 	}
 }
 
-func (e *Exec)buildargv(s string) []string {
+func (e *Exec) buildargv(s string) []string {
 	fields := strings.Fields(s)
 	for i, f := range fields {
 		fields[i] = expand(e, []rune(f))

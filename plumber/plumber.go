@@ -23,7 +23,7 @@ func main() {
 	if err != nil {
 		errorf("can't open rules file %s: %v", plumbfile, err)
 	}
-	
+
 	rules := newRules()
 	err = rules.readrules(*plumbfile, f)
 	if err != nil {

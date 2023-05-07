@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -177,7 +178,6 @@ func dollar(e *Exec, s string) (ret string, consumed int) {
 	default:
 		return variable(varname), idx
 	}
-	panic("Notreached")
 }
 
 func expand(e *Exec, s []rune) string {
@@ -366,7 +366,7 @@ func NewRuleset() *Ruleset {
 	return &rs
 }
 
-func (in *Input) readruleset() (*Ruleset, error) {
+func (rules *Rules) readruleset(in *Input) (*Ruleset, error) {
 
 	plan9root := unsharp("#9/")
 	if plan9root != "#9/" {
@@ -423,40 +423,44 @@ func (in *Input) readruleset() (*Ruleset, error) {
 
 		// declare ports
 		for i := range rs.act {
-			addport(rs.act[i].qarg)
+			rules.addport(rs.act[i].qarg)
 		}
 
 	}
 }
 
-func (rules *Rules)readrules(name string, fd io.Reader) (error) {
+func (rules *Rules) readrules(name string, fd io.Reader) error {
 	var in Input
 
 	in.pushinput(name, fd)
 	for {
-		rs, err := in.readruleset()
+		rs, err := rules.readruleset(&in)
 		if err == io.EOF || rs == nil {
-			return nil
+			break
 		}
 		if err != nil {
 			return err
 		}
-		*rules = append(*rules, rs)
+		rules.rs = append(rules.rs, rs)
 	}
 	in.popinput()
 
 	return nil
 }
 
-func (r Rule)String() string {
+func (r *Rules) clear() {
+	r.rs = r.rs[0:0]
+}
+
+func (r Rule) String() string {
 	return fmt.Sprintf("%s\t%s\t%s\n", objectNames[r.obj], verbNames[r.verb], r.arg)
 }
 
-func (v Var)String() string {
-	return fmt.Sprintf( "%s=%s\n\n", v.name, v.value)
+func (v Var) String() string {
+	return fmt.Sprintf("%s=%s\n\n", v.name, v.value)
 }
 
-func (r Ruleset)String() string {
+func (r Ruleset) String() string {
 	sb := strings.Builder{}
 	for _, p := range r.pat {
 		sb.WriteString(p.String())
@@ -472,24 +476,49 @@ func printport(port string) string {
 	return fmt.Sprintf("plumb to %s\n", port)
 }
 
-func (rules Rules)String() string {
+func (rules Rules) String() string {
 	sb := strings.Builder{}
 	for _, v := range vars {
 		sb.WriteString(v.String())
 	}
-	for _, p := range ports {
+	for _, p := range rules.ports {
 		sb.WriteString(p)
 	}
 	sb.WriteRune('\n')
-	for _, r := range rules {
+	for _, r := range rules.rs {
 		sb.WriteString(r.String())
 	}
 	return sb.String()
 }
 
-func (r *Rules)morerules(text string) error {
-	// TODO(PAL): some complicated(?) handling for returning errors early?
-	// The original appears to add them one rule at a time. 
-	return r.readrules("<rules input>", strings.NewReader(text))
+// Read as many full rules as possible, return any remaining text.
+// Full rules are delimited by newlines.
+func (r *Rules) morerules(s []byte, done bool) (remainder []byte, err error) {
+	for {
+		idx := bytes.Index(s, []byte("\n\n"))
+		if idx == -1 {
+			if !done {
+				break
+			}
+			idx = len(s) // Process the trailing bits.
+		}
+		err := r.readrules("<rules input>", bytes.NewReader(s[:idx]))
+		if err != nil {
+			return s, err
+		}
+		if idx+2 > len(s) { // end of input
+			return nil, nil
+		}
+		s = s[idx+2:]
+	}
+	return s, nil
 }
 
+func (fsys *Fsys) writerules(s []byte) (err error) {
+	if s != nil {
+		fsys.text = append(fsys.text, s...)
+	}
+	fsys.text, err = fsys.rules.morerules(fsys.text, s == nil)
+	fsys.rules.makeports()
+	return err
+}
