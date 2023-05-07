@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/paul-lalonde/plumb"
+	"9fans.net/go/plumb"
 )
 
 type Input struct {
@@ -142,7 +142,7 @@ func filename(e *Exec, name string) string {
 	if filepath.IsAbs(string(e.msg.Data)) {
 		return filepath.Clean(string(e.msg.Data))
 	}
-	path := filepath.Join(string(e.msg.Wdir), string(e.msg.Data))
+	path := filepath.Join(string(e.msg.Dir), string(e.msg.Data))
 	return filepath.Clean(path)
 }
 
@@ -166,18 +166,30 @@ func dollar(e *Exec, s string) (ret string, consumed int) {
 	case "dir":
 		return e.dir, idx
 	case "attr":
-		return plumb.Packattr(e.msg.Attr), idx
+		return plumbpackattr(e.msg.Attr), idx
 	case "data":
-		return e.msg.Data, idx
+		return string(e.msg.Data), idx
 	case "file":
 		return e.file, idx
 	case "type":
-		return e.msg.Typ, idx
+		return string(e.msg.Type), idx
 	case "wdir":
-		return e.msg.Wdir, idx
+		return e.msg.Dir, idx
 	default:
 		return variable(varname), idx
 	}
+}
+
+func plumbpackattr(attr *plumb.Attribute) string {
+	w := &strings.Builder{}
+	for a := attr; a != nil; a = a.Next {
+		if a != attr {
+			fmt.Fprint(w, " ")
+		}
+		fmt.Fprintf(w, "%s=%s", a.Name, quoteAttribute(a.Value))
+	}
+	fmt.Fprintf(w, "\n")
+	return w.String()
 }
 
 func expand(e *Exec, s []rune) string {

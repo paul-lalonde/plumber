@@ -3,28 +3,29 @@ package main
 import (
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/paul-lalonde/plumb"
+	"9fans.net/go/plumb"
 )
 
-func (e *Exec) verbis(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbis(obj Object, m *plumb.Message, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'is' object %d\n", obj)
 	case OData:
-		return m.Data == r.qarg
+		return string(m.Data) == r.qarg
 	case ODst:
-		return m.Dst == r.qarg
+		return string(m.Dst) == r.qarg
 	case OType:
-		return m.Typ == r.qarg
+		return string(m.Type) == r.qarg
 	case OWdir:
-		return m.Wdir == r.qarg
+		return string(m.Dir) == r.qarg
 	case OSrc:
-		return m.Src == r.qarg
+		return string(m.Src) == r.qarg
 	}
 	return false
 }
@@ -62,21 +63,21 @@ func (e *Exec) setvar(rs []string) {
 	}
 }
 
-func (e *Exec) verbmatches(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbmatches(obj Object, m *plumb.Message, r *Rule) bool {
 	text := ""
 	switch obj {
 	default:
 		errorf("unimplemented 'matches' object %d\n", obj)
 	case OData:
-		clickval := m.Lookup("click")
+		clickval := m.LookupAttr("click")
 		if clickval == "" {
-			text = m.Data
+			text = string(m.Data)
 		} else {
 			cval, err := strconv.Atoi(clickval)
 			if err != nil {
 				errorf("error parsing clickval (%v), using 0", clickval)
 			}
-			ri, rs := clickmatch(r.regex, m.Data, cval)
+			ri, rs := clickmatch(r.regex, string(m.Data), cval)
 			if ri == nil {
 				return false
 			}
@@ -94,9 +95,9 @@ func (e *Exec) verbmatches(obj Object, m *plumb.Msg, r *Rule) bool {
 	case ODst:
 		text = m.Dst
 	case OType:
-		text = m.Typ
+		text = m.Type
 	case OWdir:
-		text = m.Wdir
+		text = m.Dir
 	case OSrc:
 		text = m.Src
 	}
@@ -135,23 +136,23 @@ func absolute(dir, file string) string {
 	return filepath.Clean(path)
 }
 
-func (e *Exec) verbisfile(obj Object, m *plumb.Msg, r *Rule, maskon, maskoff uint32) (string, bool) {
+func (e *Exec) verbisfile(obj Object, m *plumb.Message, r *Rule, maskon, maskoff uint32) (string, bool) {
 	file := ""
 	switch obj {
 	default:
 		errorf("unimplemented 'isfile' object %d", obj)
 	case OArg:
-		file = absolute(m.Wdir, expand(e, []rune(r.arg)))
+		file = absolute(m.Dir, expand(e, []rune(r.arg)))
 		if isfile(file, maskon, maskoff) {
 			return file, true
 		}
 	case OData:
-		file = absolute(m.Wdir, expand(e, []rune(m.Data)))
+		file = absolute(m.Dir, expand(e, []rune(string(m.Data))))
 		if isfile(file, maskon, maskoff) {
 			return file, true
 		}
 	case OWdir:
-		file = absolute(m.Wdir, expand(e, []rune(m.Wdir)))
+		file = absolute(m.Dir, expand(e, []rune(string(m.Dir))))
 		if isfile(file, maskon, maskoff) {
 			return file, true
 		}
@@ -159,13 +160,13 @@ func (e *Exec) verbisfile(obj Object, m *plumb.Msg, r *Rule, maskon, maskoff uin
 	return "", false
 }
 
-func (e *Exec) verbset(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbset(obj Object, m *plumb.Message, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'set' object %d", obj)
 		return false
 	case OData:
-		m.Data = expand(e, []rune(r.arg))
+		m.Data = []byte(expand(e, []rune(r.arg)))
 		e.p0 = -1
 		e.p1 = -1
 		e.setdata = false
@@ -174,10 +175,10 @@ func (e *Exec) verbset(obj Object, m *plumb.Msg, r *Rule) bool {
 		m.Dst = expand(e, []rune(r.arg))
 		return true
 	case OType:
-		m.Typ = expand(e, []rune(r.arg))
+		m.Type = expand(e, []rune(r.arg))
 		return true
 	case OWdir:
-		m.Wdir = expand(e, []rune(r.arg))
+		m.Dir = expand(e, []rune(r.arg))
 		return true
 	case OSrc:
 		m.Src = expand(e, []rune(r.arg))
@@ -185,29 +186,49 @@ func (e *Exec) verbset(obj Object, m *plumb.Msg, r *Rule) bool {
 	}
 }
 
-func (e *Exec) verbadd(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbadd(obj Object, m *plumb.Message, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'add' object %d", obj)
 		return false
 	case OAttr:
-		m.Attr = append(m.Attr, plumb.Unpackattr(expand(e, []rune(r.arg))))
+		m.Attr = readAttr([]byte(expand(e, []rune(r.arg))))
 		return true
 	}
 }
 
-func (e *Exec) verbdelete(obj Object, m *plumb.Msg, r *Rule) bool {
+func (e *Exec) verbdelete(obj Object, m *plumb.Message, r *Rule) bool {
 	switch obj {
 	default:
 		errorf("unimplemented 'delete' object %d", obj)
 		return false
 	case OAttr:
 		a := expand(e, []rune(r.arg))
-		return m.Delattr(a)
+		m.Attr = plumbdelattr(m.Attr, a)
+		return true
 	}
 }
 
-func (e *Exec) matchpat(m *plumb.Msg, r *Rule) bool {
+func plumbdelattr(attr *plumb.Attribute, name string) *plumb.Attribute {
+	var prev, l *plumb.Attribute
+	for l = attr; l != nil; l = l.Next {
+		if name == l.Name {
+			break
+		}
+		prev = l
+	}
+	if l == nil {
+		return attr
+	}
+	if prev != nil {
+		prev.Next = l.Next
+	} else {
+		attr = l.Next
+	}
+	return attr
+}
+
+func (e *Exec) matchpat(m *plumb.Message, r *Rule) bool {
 	switch r.verb {
 	default:
 		errorf("unimplemented verb %d\n", r.verb)
@@ -238,11 +259,11 @@ func (e *Exec) matchpat(m *plumb.Msg, r *Rule) bool {
 	}
 }
 
-func (e *Exec) rewrite(m *plumb.Msg) {
+func (e *Exec) rewrite(m *plumb.Message) {
 	if e.clearclick {
-		m.Delattr("click")
+		m.Attr = plumbdelattr(m.Attr, "click")
 		if e.setdata {
-			m.Data = expand(e, []rune("$0"))
+			m.Data = []byte(expand(e, []rune("$0")))
 		}
 	}
 }
@@ -255,11 +276,11 @@ func (e *Exec) buildargv(s string) []string {
 	return fields
 }
 
-func newexec(m *plumb.Msg) *Exec {
+func newexec(m *plumb.Message) *Exec {
 	return &Exec{msg: m, p0: -1, p1: -1}
 }
 
-func matchruleset(m *plumb.Msg, rs *Ruleset) *Exec {
+func matchruleset(m *plumb.Message, rs *Ruleset) *Exec {
 	if m.Dst != "" && rs.port != "" && m.Dst != rs.port {
 		return nil
 	}
@@ -274,4 +295,35 @@ func matchruleset(m *plumb.Msg, rs *Ruleset) *Exec {
 	}
 	exec.rewrite(m)
 	return exec
+}
+
+// Launch the required app.
+func startup(rs *Ruleset, e *Exec) string {
+	var a Rule
+	launch := func(a *Rule) string {
+		argv := e.buildargv(a.arg)
+		if len(argv) == 0 {
+			return "empty argument list"
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
+		os.Stdin = nil
+		cmd.Start()
+		return ""
+	}
+
+	if rs != nil {
+		for _, a = range rs.act {
+			if a.verb == VStart {
+				return launch(&a)
+			}
+			if a.verb == VClient {
+				if e.msg.Dst == "" {
+					return "no port for \"client\" rule"
+				}
+				e.holdforclient = true
+				return launch(&a)
+			}
+		}
+	}
+	return "no start action for plumb message"
 }

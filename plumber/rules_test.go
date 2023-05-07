@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paul-lalonde/plumb"
+	"9fans.net/go/plumb"
 )
 
 func TestExpand(t *testing.T) {
@@ -23,14 +23,13 @@ func TestExpand(t *testing.T) {
 	}
 
 	e := &Exec{
-		msg: &plumb.Msg{
-			Src:   "source",
-			Dst:   "destination",
-			Wdir:  "/tmp",
-			Typ:   "type",
-			Attr:  []plumb.Attr{{Name: "name", Value: "value"}},
-			Ndata: 5,
-			Data:  "hello",
+		msg: &plumb.Message{
+			Src:  "source",
+			Dst:  "destination",
+			Dir:  "/tmp",
+			Type: "type",
+			Attr: &plumb.Attribute{Name: "name", Value: "value"},
+			Data: []byte("hello"),
 		},
 		match: [10]string{"amatch", "", "", "", "", "", "", "", "", ""},
 		file:  "filename",

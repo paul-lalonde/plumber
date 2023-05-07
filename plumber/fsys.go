@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"os/user"
 	"strconv"
 	"strings"
@@ -59,11 +61,11 @@ type Readreq struct {
 }
 
 type Sendreq struct {
-	//nfid  int    /* of number that fids receive should message this */
-	nleft int    /* left number haven that'received t it */
+	nfid  int    /* number of fids that should receive this message */
+	nleft int    /* number left that haven't received it */
 	fid   []*Fid /* fid[nfid] */
 	msg   *plumb.Message
-	pack  []byte /* plumbpack()message ed */
+	pack  []byte /* plumbpack()ed message */
 	next  *Sendreq
 }
 
@@ -87,10 +89,13 @@ type Fsys struct {
 	queue         sync.Mutex
 	rulesref      sync.Mutex
 	rulesrefcount int
-	fcall         map[int]func(*plan9.Fcall, []byte, *Fid) *plan9.Fcall
+	readlock      sync.Mutex
+	fcall         map[uint8]func(*plan9.Fcall, []byte, *Fid) *plan9.Fcall
 	srvfd         io.Writer
 	messagesize   uint
 	clock         uint32
+
+	sfdR, sfdW *os.File
 
 	fids map[uint32]*Fid
 	dir  []Dirtab
@@ -105,7 +110,7 @@ type Fsys struct {
 func NewFsys() *Fsys {
 	fsys := &Fsys{}
 
-	fsys.fcall = map[int]func(*plan9.Fcall, []byte, *Fid) *plan9.Fcall{
+	fsys.fcall = map[uint8]func(*plan9.Fcall, []byte, *Fid) *plan9.Fcall{
 		plan9.Tflush:   func(t *plan9.Fcall, buf []byte, fid *Fid) *plan9.Fcall { return fsys.flush(t, buf, fid) },
 		plan9.Tversion: func(t *plan9.Fcall, buf []byte, fid *Fid) *plan9.Fcall { return fsys.version(t, buf, fid) },
 		plan9.Tauth:    func(t *plan9.Fcall, buf []byte, fid *Fid) *plan9.Fcall { return fsys.auth(t, buf, fid) },
@@ -129,7 +134,41 @@ func NewFsys() *Fsys {
 }
 
 func (fsys *Fsys) start() {
-	panic("unimplemented")
+	fsys.clock = getclock()
+	r1, w1, err := os.Pipe()
+	if err != nil {
+		errorf("can't create pipe")
+	}
+	r2, w2, err := os.Pipe()
+	if err != nil {
+		errorf("can't create pipe")
+	}
+	fsys.sfdR, fsys.sfdW = r1, w2
+	if err := post9pservice(r2, w1, "plumb", ""); err != nil {
+		errorf("can't post service")
+	}
+	go fsys.proc()
+}
+
+func (fsys *Fsys) proc() {
+	var f *Fid
+	for {
+		t, err := plan9.ReadFcall(fsys.sfdR)
+		if err != nil {
+			errorf("Error reading fcall: %v", err)
+			os.Exit(1)
+		}
+		if fsys.fcall[t.Type] == nil {
+			fsys.respond(t, Ebadfcall)
+		} else {
+			if t.Type == plan9.Tversion || t.Type == plan9.Tauth {
+				f = nil
+			} else {
+				f = fsys.newfid(t.Fid)
+			}
+			fsys.fcall[t.Type](t, nil, f)
+		}
+	}
 }
 
 func (r *Rules) addport(port string) {
@@ -306,7 +345,6 @@ func (fsys *Fsys) walk(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 }
 
 func (fsys *Fsys) open(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
-	panic("unimplemented")
 	deny := func() *plan9.Fcall {
 		fsys.respond(t, Eperm)
 		return t
@@ -385,7 +423,7 @@ func (fsys *Fsys) read(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 		fsys.queue.Lock()
 		defer fsys.queue.Unlock()
 		queueread(f.dir, t, f)
-		drainqueue(f.dir)
+		fsys.drainqueue(f.dir)
 		return nil
 	}
 	// Any other read is of a directory.  Pass back all entries.
@@ -431,7 +469,7 @@ func (fsys *Fsys) readrules(t *plan9.Fcall) *plan9.Fcall {
 }
 
 func (fsys *Fsys) write(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
-	//var data []rune
+	var data []byte
 	switch f.qid.Path {
 	case Qdir:
 		fsys.respond(t, Eisdir)
@@ -446,36 +484,144 @@ func (fsys *Fsys) write(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 		}
 		return t
 	case Qsend:
-		/*
-			if f.offset == 0 {
-				data = t.Data[0:t.Count]
-			} else {
-				// Partial message already assembled
-				f.writebuf = append(f.writebuf, t.Data)
-				data = f.writebuf[0:t.Offset + t.Count]
+		if f.offset == 0 {
+			data = t.Data
+		} else {
+			// partial message already assembled
+			f.writebuf = append(f.writebuf[:f.offset], t.Data[:t.Count]...) // Probably don't need the slicing counts.
+			data = f.writebuf
+		}
+		m, n := unpackPartial(data)
+		if m == nil {
+			if n == 0 {
+				f.offset = 0
+				f.writebuf = nil
+				fsys.respond(t, Ebadmsg)
+				return t
 			}
-				plumb.Message
-			m, &n := unpackPartial(data)
-		*/
+			if f.offset == 0 {
+				f.writebuf = make([]byte, t.Count)
+				copy(f.writebuf, t.Data[0:t.Count])
+			}
+			f.offset += int64(t.Count)
+			fsys.respond(t, "")
+			return t
+		}
+		/* release partial buffer */
+		f.offset = 0
+		f.writebuf = nil
+		for _, r := range fsys.rules.rs {
+			if e := matchruleset(m, r); e != nil {
+				fsys.dispose(t, m, r, e)
+				return nil
+			}
+		}
+		if m.Dst != "" {
+			fsys.dispose(t, m, nil, nil)
+			return nil
+		}
+		fsys.respond(t, "no matching plumb rule")
+		return t
 	}
 	fsys.respond(t, "internal error: write to unknown file")
 	return t
 }
 
-func (fsys *Fsys) clunk(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
-	panic("unimplemented")
+func (fsys *Fsys) dispose(t *plan9.Fcall, m *plumb.Message, rs *Ruleset, e *Exec) {
+	fsys.queue.Lock()
+	var err string
+	if m.Dst == "" {
+		err = Enoport
+		if rs != nil {
+			err = startup(rs, e)
+		}
+	} else {
+		for i := NQID; i < len(fsys.dir); i++ {
+			if m.Dst == fsys.dir[i].name {
+				if fsys.dir[i].nopen == 0 {
+					err = startup(rs, e)
+					if e != nil && e.holdforclient {
+						hold(m, &fsys.dir[i])
+					} else {
+						m = nil // release the message
+					}
+				} else {
+					queuesend(&fsys.dir[i], m)
+					fsys.drainqueue(&fsys.dir[i])
+				}
+				break
+			}
+		}
+	}
+	fsys.queue.Unlock()
+	fsys.respond(t, err)
 }
 
-func (fsys *Fsys) remove(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
-	panic("unimplemented")
+func hold(m *plumb.Message, d *Dirtab) {
+	var q *Holdq
+
+	h := &Holdq{}
+	h.msg = m
+	/* add to end of queue */
+	if d.holdq == nil {
+		d.holdq = h
+	} else {
+		for q = d.holdq; q.next != nil; q = q.next {
+		}
+		q.next = h
+	}
+}
+
+func (fsys *Fsys) clunk(t *plan9.Fcall, _ []byte, f *Fid) *plan9.Fcall {
+	fsys.queue.Lock()
+
+	if f.open {
+		d := f.dir
+		d.nopen--
+		if d.qid == Qrules && (f.mode == plan9.OWRITE || f.mode == plan9.ORDWR) {
+			fsys.writerules(nil)
+			fsys.rulesref.Lock()
+			fsys.rulesrefcount--
+			fsys.rulesref.Unlock()
+		}
+		prev := (*Fid)(nil)
+		for p := d.fopen; p != nil; p = p.nextopen {
+			if p == f {
+				if prev != nil {
+					prev.nextopen = f.nextopen
+				} else {
+					d.fopen = f.nextopen
+				}
+				removesenders(d, f)
+				break
+			}
+			prev = p
+		}
+	}
+	f.busy = false
+	f.open = false
+	f.offset = 0
+	f.writebuf = nil
+	fsys.queue.Unlock()
+	fsys.respond(t, "")
+	return t
+}
+
+func (fsys *Fsys) remove(t *plan9.Fcall, buf []byte, _ *Fid) *plan9.Fcall {
+	fsys.respond(t, Eperm)
+	return t
 }
 
 func (fsys *Fsys) stat(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
-	panic("unimplemented")
+	t.Stat = fsys.dostat(f.dir, fsys.clock)
+	fsys.respond(t, "")
+	t.Stat = nil
+	return t
 }
 
-func (fsys *Fsys) wstat(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
-	panic("unimplemented")
+func (fsys *Fsys) wstat(t *plan9.Fcall, buf []byte, _ *Fid) *plan9.Fcall {
+	fsys.respond(t, Eperm)
+	return t
 }
 
 func queueheld(d *Dirtab) {
@@ -486,8 +632,55 @@ func queueheld(d *Dirtab) {
 	}
 }
 
+/* remove messages awaiting delivery to now-closing fid */
+func removesenders(d *Dirtab, fid *Fid) {
+	var prevs, nexts *Sendreq
+	for s := d.sendq; s != nil; s = nexts {
+		nexts = s.next
+		for i := 0; i < s.nfid; i++ {
+			if fid == s.fid[i] {
+				s.fid[i] = nil
+				s.nleft--
+				break
+			}
+		}
+		if s.nleft == 0 {
+			s.fid = nil
+			if prevs != nil {
+				prevs.next = s.next
+			} else {
+				d.sendq = s.next
+			}
+		} else {
+			prevs = s
+		}
+	}
+}
+
 func queuesend(d *Dirtab, m *plumb.Message) {
-	panic("unimplemented")
+	s := &Sendreq{}
+	s.nfid = d.nopen
+	s.nleft = s.nfid
+	s.fid = make([]*Fid, s.nfid)
+	i := 0
+	for f := d.fopen; f != nil; f = f.nextopen {
+		s.fid[i] = f
+		i++
+	}
+	s.msg = m
+	s.next = nil
+	/* link to end of queue; drainqueue() searches in sender order so this implements a FIFO */
+	var t *Sendreq
+	for t = d.sendq; t != nil; t = t.next {
+		if t.next == nil {
+			break
+		}
+	}
+	if t == nil {
+		d.sendq = s
+	} else {
+		t.next = s
+	}
 }
 
 func queueread(d *Dirtab, t *plan9.Fcall, f *Fid) {
@@ -500,67 +693,87 @@ func queueread(d *Dirtab, t *plan9.Fcall, f *Fid) {
 	d.readq = &r
 }
 
-func drainqueue(d *Dirtab) {
-	panic("unimplemented")
-} /*
-	var r, nextr, prevr *Readreq
-	var s, nexts, prevs *Sendreq
+func (fsys *Fsys) drainqueue(d *Dirtab) {
+	var nexts, prevs *Sendreq
+	var nextr, prevr *Readreq
 
-	prevs = nil
-	for s=d.sendq; s!=nil; s=nexts {
+	for s := d.sendq; s != nil; s = nexts {
 		nexts = s.next
-		for i := range s.fid {
+		for i := 0; i < s.nfid; i++ {
 			prevr = nil
-			for r=d.readq; r!=nil; r=nextr {
-				nextr = r.next;
+			for r := d.readq; r != nil; r = nextr {
+				nextr = r.next
 				if r.fid == s.fid[i] {
-					// pack the message if necessary
-					if(s.pack == nil) {
-						s->pack = plumbpack(s->msg, &s->npack);
+					if s.pack == nil {
+						s.pack = plumbpack(s.msg)
 					}
-					// exchange the stuff...
-					r->fcall->data = s->pack+r->fid->offset;
-					n = s->npack - r->fid->offset;
-					if(n > messagesize-IOHDRSZ)
-						n = messagesize-IOHDRSZ;
-					if(n > r->fcall->count)
-						n = r->fcall->count;
-					r->fcall->count = n;
-					fsys.respond(r->fcall, r->buf, nil);
-					r->fid->offset += n;
-					if(r->fid->offset >= s->npack){
-						// message transferred; delete this fid from send queue
-						r->fid->offset = 0;
-						s->fid[i] = nil;
-						s->nleft--;
+					r.fcall.Data = s.pack[r.fid.offset:]
+					n := uint(len(r.fcall.Data)) // len(s.pack) - r.fid.offset
+					if n > fsys.messagesize-uint(plan9.IOHDRSZ) {
+						n = fsys.messagesize - uint(plan9.IOHDRSZ)
 					}
-					// delete read request from queue
-					if(prevr)
-						prevr->next = r->next;
-					else
-						d->readq = r->next;
-					free(r->fcall);
-					free(r);
-					break;
-				}else
-					prevr = r;
+					if n > uint(r.fcall.Count) {
+						n = uint(r.fcall.Count)
+					}
+					r.fcall.Count = uint32(n)
+					r.fcall.Data = r.fcall.Data[:r.fcall.Count]
+					fsys.respond(r.fcall, "")
+					r.fid.offset += int64(n)
+					if r.fid.offset > int64(len(s.pack)) {
+						/* message transferred; delete this fid from send queue */
+						r.fid.offset = 0
+						s.fid[i] = nil
+						s.nleft--
+					}
+					if prevr != nil {
+						prevr.next = r.next
+					} else {
+						d.readq = r.next
+					}
+					break
+				} else {
+					prevr = r
+				}
 			}
 		}
-		// if no fids left, delete this send from queue
-		if(s->nleft == 0){
-			free(s->fid);
-			plumbfree(s->msg);
-			free(s->pack);
-			if(prevs)
-				prevs->next = s->next;
-			else
-				d->sendq = s->next;
-			free(s);
-		}else
-			prevs = s;
+		/* if no fids left, delete this send from queue */
+		if s.nleft == 0 {
+			if prevs != nil {
+				prevs.next = s.next
+			} else {
+				d.sendq = s.next
+			}
+		} else {
+			prevs = s
+		}
 	}
 }
-*/
+
+func packattr(attr *plumb.Attribute, w io.Writer) {
+	for a := attr; a != nil; a = a.Next {
+		if a != attr {
+			fmt.Fprint(w, " ")
+		}
+		fmt.Fprintf(w, "%s=%s", a.Name, quoteAttribute(a.Value))
+	}
+	fmt.Fprintf(w, "\n")
+}
+
+func plumbpack(m *plumb.Message) []byte {
+	p := bytes.Buffer{}
+	p.WriteString(m.Src)
+	p.WriteRune('\n')
+	p.WriteString(m.Dst)
+	p.WriteRune('\n')
+	p.WriteString(m.Dir)
+	p.WriteRune('\n')
+	p.WriteString(m.Type)
+	p.WriteRune('\n')
+	packattr(m.Attr, &p)
+	p.WriteString(fmt.Sprintf("%d\n", len(m.Data)))
+	p.Write(m.Data)
+	return p.Bytes()
+}
 
 func (fsys *Fsys) dostat(dir *Dirtab, clock uint32) []byte {
 	var d plan9.Dir
@@ -722,4 +935,22 @@ func unquoteAttribute(s string) (string, error) {
 		b = append(b, c)
 	}
 	return string(b), nil
+}
+
+// quoteAttribute quotes the attribute value, if necessary, and returns the result.
+func quoteAttribute(s string) string {
+	if !strings.ContainsAny(s, " '=\t") {
+		return s
+	}
+	b := make([]byte, 0, 10+len(s)) // Room for a couple of quotes and a few backslashes.
+	b = append(b, quote)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == quote {
+			b = append(b, quote)
+		}
+		b = append(b, c)
+	}
+	b = append(b, quote)
+	return string(b)
 }

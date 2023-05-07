@@ -4,7 +4,7 @@ import (
 	"regexp"
 
 	"9fans.net/go/plan9"
-	"github.com/paul-lalonde/plumb"
+	"9fans.net/go/plumb"
 )
 
 type Object int
@@ -64,7 +64,7 @@ type Ruleset struct {
 }
 
 type Exec struct {
-	msg           *plumb.Msg
+	msg           *plumb.Message
 	match         [10]string
 	text          string
 	p0, p1        int
