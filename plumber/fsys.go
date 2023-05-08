@@ -91,14 +91,12 @@ type Fsys struct {
 	rulesrefcount int
 	readlock      sync.Mutex
 	fcall         map[uint8]func(*plan9.Fcall, []byte, *Fid) *plan9.Fcall
-	srvfd         io.Writer
 	messagesize   uint
 	clock         uint32
 
 	sfdR, sfdW *os.File
 
 	fids map[uint32]*Fid
-	dir  []Dirtab
 
 	rules Rules
 
@@ -147,7 +145,7 @@ func (fsys *Fsys) start() {
 	if err := post9pservice(r2, w1, "plumb", ""); err != nil {
 		errorf("can't post service")
 	}
-	go fsys.proc()
+	fsys.proc() // TODO(PAL): Daemonzie
 }
 
 func (fsys *Fsys) proc() {
@@ -181,7 +179,7 @@ func (r *Rules) addport(port string) {
 		}
 	}
 	r.dir = append(r.dir,
-		Dirtab{name: port, qid: uint64(len(r.dir)), perm: 0o0400})
+		&Dirtab{name: port, qid: uint64(len(r.dir)), perm: 0o0400})
 	r.ports = append(r.ports, port)
 }
 
@@ -198,7 +196,7 @@ func (fsys *Fsys) respond(t *plan9.Fcall, msg string) {
 	} else {
 		t.Type++
 	}
-	err := plan9.WriteFcall(fsys.srvfd, t)
+	err := plan9.WriteFcall(fsys.sfdW, t)
 	if err != nil {
 		errorf("failed to write Fcall: %s", err)
 	}
@@ -207,7 +205,7 @@ func (fsys *Fsys) respond(t *plan9.Fcall, msg string) {
 func (fsys *Fsys) flush(t *plan9.Fcall, _ []byte, _ *Fid) *plan9.Fcall {
 	fsys.queue.Lock()
 	for _, d := range fsys.rules.dir[NQID:] {
-		flushqueue(&d, t.Oldtag)
+		flushqueue(d, t.Oldtag)
 	}
 	fsys.queue.Unlock()
 	fsys.respond(t, "")
@@ -239,6 +237,8 @@ func (fsys *Fsys) version(t *plan9.Fcall, _ []byte, _ *Fid) *plan9.Fcall {
 	if t.Version != "9P2000" {
 		fsys.respond(t, "unrecognized 9P version")
 	}
+	t.Version = "9P2000"
+	fsys.respond(t, "")
 	return t
 }
 
@@ -253,7 +253,7 @@ func (fsys *Fsys) attach(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 	f.qid.Type = plan9.QTDIR
 	f.qid.Path = Qdir
 	f.qid.Vers = 0
-	f.dir = &fsys.dir[0]
+	f.dir = fsys.rules.dir[0]
 	out := &plan9.Fcall{
 		Type: t.Type,
 		Tag:  t.Tag,
@@ -302,6 +302,7 @@ func (fsys *Fsys) walk(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 	err := ""
 
 	if len(t.Wname) > 0 {
+	NextPath:
 		for _, wname := range t.Wname {
 			if q.Type&plan9.QTDIR == 0 {
 				err = Enotdir
@@ -314,14 +315,14 @@ func (fsys *Fsys) walk(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 				out.Wqid = append(out.Wqid, q)
 				continue
 			}
-			for _, d := range fsys.dir[1:] { // skip '.'
+			for _, d := range fsys.rules.dir[1:] { // skip '.'
 				if wname == d.name {
 					q.Type = d.typ
 					q.Vers = 0
 					q.Path = d.qid
-					dir = &d
+					dir = d
 					out.Wqid = append(out.Wqid, q)
-					continue
+					continue NextPath
 				}
 			}
 			err = Enoexist
@@ -430,12 +431,12 @@ func (fsys *Fsys) read(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 	o := int(t.Offset)
 	e := o + int(t.Count)
 	clock := getclock()
-	d := fsys.dir[1:]
+	d := fsys.rules.dir[1:]
 	var b []byte
 	var bb bytes.Buffer
 	for i := 0; len(d) > 0 && i < e; i += len(b) {
-		b = fsys.dostat(&d[0], clock)
-		if int(fsys.messagesize)-plan9.IOHDRSZ-bb.Len() < len(b) {
+		b = fsys.dostat(d[0], clock)
+		if len(b) < 2 /*BIT16SZ*/ {
 			break
 		}
 		if i >= o {
@@ -457,6 +458,7 @@ func (fsys *Fsys) readrules(t *plan9.Fcall) *plan9.Fcall {
 	t.Data = []byte(p)
 	if t.Offset >= uint64(n) {
 		t.Count = 0
+		t.Data = t.Data[0:0]
 	} else {
 		t.Data = []byte(p)[t.Offset:]
 		if t.Offset+uint64(t.Count) > n {
@@ -477,6 +479,7 @@ func (fsys *Fsys) write(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 	case Qrules:
 		fsys.clock = getclock()
 		err := fsys.writerules(t.Data)
+		t.Count = uint32(len(t.Data))
 		if err != nil {
 			fsys.respond(t, err.Error())
 		} else {
@@ -503,6 +506,7 @@ func (fsys *Fsys) write(t *plan9.Fcall, buf []byte, f *Fid) *plan9.Fcall {
 				f.writebuf = make([]byte, t.Count)
 				copy(f.writebuf, t.Data[0:t.Count])
 			}
+			t.Count = uint32(len(t.Data))
 			f.offset += int64(t.Count)
 			fsys.respond(t, "")
 			return t
@@ -536,24 +540,25 @@ func (fsys *Fsys) dispose(t *plan9.Fcall, m *plumb.Message, rs *Ruleset, e *Exec
 			err = startup(rs, e)
 		}
 	} else {
-		for i := NQID; i < len(fsys.dir); i++ {
-			if m.Dst == fsys.dir[i].name {
-				if fsys.dir[i].nopen == 0 {
+		for i := NQID; i < len(fsys.rules.dir); i++ {
+			if m.Dst == fsys.rules.dir[i].name {
+				if fsys.rules.dir[i].nopen == 0 {
 					err = startup(rs, e)
 					if e != nil && e.holdforclient {
-						hold(m, &fsys.dir[i])
+						hold(m, fsys.rules.dir[i])
 					} else {
 						m = nil // release the message
 					}
 				} else {
-					queuesend(&fsys.dir[i], m)
-					fsys.drainqueue(&fsys.dir[i])
+					queuesend(fsys.rules.dir[i], m)
+					fsys.drainqueue(fsys.rules.dir[i])
 				}
 				break
 			}
 		}
 	}
 	fsys.queue.Unlock()
+	t.Count = uint32(len(t.Data))
 	fsys.respond(t, err)
 }
 
@@ -719,7 +724,7 @@ func (fsys *Fsys) drainqueue(d *Dirtab) {
 					r.fcall.Data = r.fcall.Data[:r.fcall.Count]
 					fsys.respond(r.fcall, "")
 					r.fid.offset += int64(n)
-					if r.fid.offset > int64(len(s.pack)) {
+					if r.fid.offset >= int64(len(s.pack)) {
 						/* message transferred; delete this fid from send queue */
 						r.fid.offset = 0
 						s.fid[i] = nil

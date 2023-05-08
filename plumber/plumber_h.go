@@ -46,15 +46,15 @@ type Rule struct {
 type Rules struct {
 	rs    []*Ruleset
 	ports []string
-	dir   []Dirtab
+	dir   []*Dirtab
 }
 
 func newRules() Rules {
 	return Rules{[]*Ruleset{}, []string{},
-		[]Dirtab{
-			{name: ".", typ: plan9.QTDIR, qid: Qdir, perm: 0o500 | plan9.DMDIR, readq: nil, sendq: nil},
-			{name: "rules", typ: plan9.QTFILE, qid: Qrules, perm: 0o600, readq: nil, sendq: nil},
-			{name: "send", typ: plan9.QTFILE, qid: Qsend, perm: 0o200, readq: nil, sendq: nil}}}
+		[]*Dirtab{
+			&Dirtab{name: ".", typ: plan9.QTDIR, qid: Qdir, perm: 0o500 | plan9.DMDIR, readq: nil, sendq: nil},
+			&Dirtab{name: "rules", typ: plan9.QTFILE, qid: Qrules, perm: 0o600, readq: nil, sendq: nil},
+			&Dirtab{name: "send", typ: plan9.QTFILE, qid: Qsend, perm: 0o200, readq: nil, sendq: nil}}}
 }
 
 type Ruleset struct {

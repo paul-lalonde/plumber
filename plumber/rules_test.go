@@ -13,15 +13,16 @@ func TestExpand(t *testing.T) {
 	ttab := []struct {
 		name, in, out string
 	}{
+		{"src", "$src", "source"},
+		{"Complex regex", "'([.a-zA-Z¡-￿0-9_/\\-@]*[a-zA-Z¡-￿0-9_/\\-])('$addr')?'", "([.a-zA-Z¡-￿0-9_/\\-@]*[a-zA-Z¡-￿0-9_/\\-])(:43)?"},
 		{"double quote", "quote '' quote", "quote  quote"},
 		{"quoted quote", "quote ' '' ' quote", "quote  '  quote"},
 		{"untransformed", "asdf", "asdf"},
-		{"src", "$src", "source"},
 		{"numeric expansion", "test $0 bar", "test amatch bar"},
 		{"simple quote", "simple 'qu$src' quote", "simple qu$src quote"},
 		{"end of line quote", "simple 'qu$src'", "simple qu$src"},
 	}
-
+	setvariable("addr", ":43", ":43")
 	e := &Exec{
 		msg: &plumb.Message{
 			Src:  "source",

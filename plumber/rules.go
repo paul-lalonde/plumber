@@ -146,19 +146,24 @@ func filename(e *Exec, name string) string {
 	return filepath.Clean(path)
 }
 
-func dollar(e *Exec, s string) (ret string, consumed int) {
+func dollar(e *Exec, s []rune) (ret string, consumed int) {
 	if e != nil && s[0] >= '0' && s[0] <= '9' {
 		return e.match[s[0]-'0'], 1
 	}
-	idx := strings.IndexFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) })
+	idx := 0
+	for idx = 0; idx < len(s); idx++ {
+		if !(unicode.IsLetter(s[idx]) || unicode.IsNumber(s[idx])) {
+			break
+		}
+	}
 	if idx == 0 {
-		idx = len(s)
+		return "", 0
 	}
 	varname := s[:idx]
 	if e == nil {
-		return variable(varname), idx
+		return variable(string(varname)), idx
 	}
-	switch s {
+	switch string(s) {
 	case "src":
 		return e.msg.Src, idx
 	case "dst":
@@ -176,7 +181,7 @@ func dollar(e *Exec, s string) (ret string, consumed int) {
 	case "wdir":
 		return e.msg.Dir, idx
 	default:
-		return variable(varname), idx
+		return variable(string(varname)), idx
 	}
 }
 
@@ -215,8 +220,8 @@ func expand(e *Exec, s []rune) string {
 			continue
 		}
 		// Variable expansion
-		val, consumed := dollar(e, string(s[i+1:]))
-		if val == "" {
+		val, consumed := dollar(e, s[i+1:])
+		if consumed == 0 {
 			out.WriteRune('$')
 			continue
 		}
@@ -287,7 +292,7 @@ func (in *Input) include(s string) (wasInclude bool, err error) {
 		return false, nil
 	}
 	args := strings.Fields(s)
-	if len(args) < 2 || args[0] != "include" || args[1][0] == '#' ||
+	if len(args) < 2 || args[0] != "include" && args[1][0] == '#' ||
 		(len(args) > 2 && args[2][0] != '#') {
 		return false, in.NewError("malformed include statement")
 	}
@@ -296,6 +301,7 @@ func (in *Input) include(s string) (wasInclude bool, err error) {
 	if err != nil && t[0] != '/' && t[0:2] != "./" && t[0:3] != "../" {
 		// Try the plumbing directory
 		t = unsharp(fmt.Sprintf("#9/plumb/%s", t))
+		fp, err = os.Open(t)
 	}
 	if err != nil {
 		return false, in.NewError("can't open %s for inclusion", t)
@@ -308,7 +314,7 @@ func (in *Input) readrule() (rp *Rule, err error) {
 	rp = &Rule{}
 Top:
 	if in.scanner == nil || !in.scanner.Scan() {
-		if !in.popinput() {
+		if !in.popinput() || !in.scanner.Scan() {
 			return nil, io.EOF
 		}
 	}
@@ -316,9 +322,8 @@ Top:
 	line := in.scanner.Text()
 	in.lineno++
 	line = strings.TrimSpace(line)
-	line = strings.Split(line, "#")[0]
 
-	if line == "" { /* empty or comment line */
+	if line == "" || line[0] == '#' { /* empty or comment line */
 		return nil, nil
 	}
 
@@ -363,7 +368,7 @@ Top:
 	if len(words) < 3 {
 		return nil, in.NewError("malformed rule")
 	}
-	rp.arg = words[2]
+	rp.arg = strings.Join(words[2:], " ")
 
 	err = in.parserule(rp)
 	return rp, err
@@ -385,14 +390,20 @@ func (rules *Rules) readruleset(in *Input) (*Ruleset, error) {
 		setvariable("plan9", plan9root, plan9root)
 	}
 
+	var err error
+	var r *Rule
+
 	for {
 		rs := NewRuleset()
 		inrule := false
 		ncmd := 0
 		for {
-			r, err := in.readrule()
+			r, err = in.readrule()
 			if err == io.EOF {
 				break
+			}
+			if err != nil {
+				return nil, err
 			}
 			if r == nil {
 				if inrule {
@@ -424,16 +435,21 @@ func (rules *Rules) readruleset(in *Input) (*Ruleset, error) {
 			return nil, in.NewError("ruleset has more than one client or start action")
 		}
 		if len(rs.pat) > 0 && len(rs.act) > 0 {
-			return rs, nil
+			return rs, err
 		}
 		if len(rs.pat) == 0 && len(rs.act) == 0 {
-			return nil, nil
+			return nil, err
 		}
 		if len(rs.act) == 0 || rs.port == "" {
 			return nil, in.NewError("ruleset must have patterns and actions")
 		}
 
 		// declare ports
+		for _, r := range rs.act {
+			if r.verb != VTo {
+				return nil, in.NewError("ruleset must have actions")
+			}
+		}
 		for i := range rs.act {
 			rules.addport(rs.act[i].qarg)
 		}
@@ -447,13 +463,15 @@ func (rules *Rules) readrules(name string, fd io.Reader) error {
 	in.pushinput(name, fd)
 	for {
 		rs, err := rules.readruleset(&in)
-		if err == io.EOF || rs == nil {
+		if rs != nil {
+			rules.rs = append(rules.rs, rs)
+		}
+		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		rules.rs = append(rules.rs, rs)
 	}
 	in.popinput()
 
@@ -507,6 +525,7 @@ func (rules Rules) String() string {
 // Full rules are delimited by newlines.
 func (r *Rules) morerules(s []byte, done bool) (remainder []byte, err error) {
 	for {
+		s = []byte(strings.TrimSpace(string(s)))
 		idx := bytes.Index(s, []byte("\n\n"))
 		if idx == -1 {
 			if !done {
