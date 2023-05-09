@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/paul-lalonde/plumb"
+	"9fans.net/go/plumb"
 )
 
 type Input struct {
@@ -141,23 +142,28 @@ func filename(e *Exec, name string) string {
 	if filepath.IsAbs(string(e.msg.Data)) {
 		return filepath.Clean(string(e.msg.Data))
 	}
-	path := filepath.Join(string(e.msg.Wdir), string(e.msg.Data))
+	path := filepath.Join(string(e.msg.Dir), string(e.msg.Data))
 	return filepath.Clean(path)
 }
 
-func dollar(e *Exec, s string) (ret string, consumed int) {
+func dollar(e *Exec, s []rune) (ret string, consumed int) {
 	if e != nil && s[0] >= '0' && s[0] <= '9' {
 		return e.match[s[0]-'0'], 1
 	}
-	idx := strings.IndexFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) })
+	idx := 0
+	for idx = 0; idx < len(s); idx++ {
+		if !(unicode.IsLetter(s[idx]) || unicode.IsNumber(s[idx])) {
+			break
+		}
+	}
 	if idx == 0 {
-		idx = len(s)
+		return "", 0
 	}
 	varname := s[:idx]
 	if e == nil {
-		return variable(varname), idx
+		return variable(string(varname)), idx
 	}
-	switch s {
+	switch string(s) {
 	case "src":
 		return e.msg.Src, idx
 	case "dst":
@@ -165,19 +171,30 @@ func dollar(e *Exec, s string) (ret string, consumed int) {
 	case "dir":
 		return e.dir, idx
 	case "attr":
-		return plumb.Packattr(e.msg.Attr), idx
+		return plumbpackattr(e.msg.Attr), idx
 	case "data":
-		return e.msg.Data, idx
+		return string(e.msg.Data), idx
 	case "file":
 		return e.file, idx
 	case "type":
-		return e.msg.Typ, idx
+		return string(e.msg.Type), idx
 	case "wdir":
-		return e.msg.Wdir, idx
+		return e.msg.Dir, idx
 	default:
-		return variable(varname), idx
+		return variable(string(varname)), idx
 	}
-	panic("Notreached")
+}
+
+func plumbpackattr(attr *plumb.Attribute) string {
+	w := &strings.Builder{}
+	for a := attr; a != nil; a = a.Next {
+		if a != attr {
+			fmt.Fprint(w, " ")
+		}
+		fmt.Fprintf(w, "%s=%s", a.Name, quoteAttribute(a.Value))
+	}
+	fmt.Fprintf(w, "\n")
+	return w.String()
 }
 
 func expand(e *Exec, s []rune) string {
@@ -203,8 +220,8 @@ func expand(e *Exec, s []rune) string {
 			continue
 		}
 		// Variable expansion
-		val, consumed := dollar(e, string(s[i+1:]))
-		if val == "" {
+		val, consumed := dollar(e, s[i+1:])
+		if consumed == 0 {
 			out.WriteRune('$')
 			continue
 		}
@@ -275,7 +292,7 @@ func (in *Input) include(s string) (wasInclude bool, err error) {
 		return false, nil
 	}
 	args := strings.Fields(s)
-	if len(args) < 2 || args[0] != "include" || args[1][0] == '#' ||
+	if len(args) < 2 || args[0] != "include" && args[1][0] == '#' ||
 		(len(args) > 2 && args[2][0] != '#') {
 		return false, in.NewError("malformed include statement")
 	}
@@ -284,6 +301,7 @@ func (in *Input) include(s string) (wasInclude bool, err error) {
 	if err != nil && t[0] != '/' && t[0:2] != "./" && t[0:3] != "../" {
 		// Try the plumbing directory
 		t = unsharp(fmt.Sprintf("#9/plumb/%s", t))
+		fp, err = os.Open(t)
 	}
 	if err != nil {
 		return false, in.NewError("can't open %s for inclusion", t)
@@ -296,7 +314,7 @@ func (in *Input) readrule() (rp *Rule, err error) {
 	rp = &Rule{}
 Top:
 	if in.scanner == nil || !in.scanner.Scan() {
-		if !in.popinput() {
+		if !in.popinput() || !in.scanner.Scan() {
 			return nil, io.EOF
 		}
 	}
@@ -304,9 +322,8 @@ Top:
 	line := in.scanner.Text()
 	in.lineno++
 	line = strings.TrimSpace(line)
-	line = strings.Split(line, "#")[0]
 
-	if line == "" { /* empty or comment line */
+	if line == "" || line[0] == '#' { /* empty or comment line */
 		return nil, nil
 	}
 
@@ -351,7 +368,7 @@ Top:
 	if len(words) < 3 {
 		return nil, in.NewError("malformed rule")
 	}
-	rp.arg = words[2]
+	rp.arg = strings.Join(words[2:], " ")
 
 	err = in.parserule(rp)
 	return rp, err
@@ -366,21 +383,27 @@ func NewRuleset() *Ruleset {
 	return &rs
 }
 
-func (in *Input) readruleset() (*Ruleset, error) {
+func (rules *Rules) readruleset(in *Input) (*Ruleset, error) {
 
 	plan9root := unsharp("#9/")
 	if plan9root != "#9/" {
 		setvariable("plan9", plan9root, plan9root)
 	}
 
+	var err error
+	var r *Rule
+
 	for {
 		rs := NewRuleset()
 		inrule := false
 		ncmd := 0
 		for {
-			r, err := in.readrule()
+			r, err = in.readrule()
 			if err == io.EOF {
 				break
+			}
+			if err != nil {
+				return nil, err
 			}
 			if r == nil {
 				if inrule {
@@ -412,51 +435,62 @@ func (in *Input) readruleset() (*Ruleset, error) {
 			return nil, in.NewError("ruleset has more than one client or start action")
 		}
 		if len(rs.pat) > 0 && len(rs.act) > 0 {
-			return rs, nil
+			return rs, err
 		}
 		if len(rs.pat) == 0 && len(rs.act) == 0 {
-			return nil, nil
+			return nil, err
 		}
 		if len(rs.act) == 0 || rs.port == "" {
 			return nil, in.NewError("ruleset must have patterns and actions")
 		}
 
 		// declare ports
+		for _, r := range rs.act {
+			if r.verb != VTo {
+				return nil, in.NewError("ruleset must have actions")
+			}
+		}
 		for i := range rs.act {
-			addport(rs.act[i].qarg)
+			rules.addport(rs.act[i].qarg)
 		}
 
 	}
 }
 
-func (rules *Rules)readrules(name string, fd io.Reader) (error) {
+func (rules *Rules) readrules(name string, fd io.Reader) error {
 	var in Input
 
 	in.pushinput(name, fd)
 	for {
-		rs, err := in.readruleset()
-		if err == io.EOF || rs == nil {
-			return nil
+		rs, err := rules.readruleset(&in)
+		if rs != nil {
+			rules.rs = append(rules.rs, rs)
+		}
+		if err == io.EOF {
+			break
 		}
 		if err != nil {
 			return err
 		}
-		*rules = append(*rules, rs)
 	}
 	in.popinput()
 
 	return nil
 }
 
-func (r Rule)String() string {
+func (r *Rules) clear() {
+	r.rs = r.rs[0:0]
+}
+
+func (r Rule) String() string {
 	return fmt.Sprintf("%s\t%s\t%s\n", objectNames[r.obj], verbNames[r.verb], r.arg)
 }
 
-func (v Var)String() string {
-	return fmt.Sprintf( "%s=%s\n\n", v.name, v.value)
+func (v Var) String() string {
+	return fmt.Sprintf("%s=%s\n\n", v.name, v.value)
 }
 
-func (r Ruleset)String() string {
+func (r Ruleset) String() string {
 	sb := strings.Builder{}
 	for _, p := range r.pat {
 		sb.WriteString(p.String())
@@ -472,24 +506,50 @@ func printport(port string) string {
 	return fmt.Sprintf("plumb to %s\n", port)
 }
 
-func (rules Rules)String() string {
+func (rules Rules) String() string {
 	sb := strings.Builder{}
 	for _, v := range vars {
 		sb.WriteString(v.String())
 	}
-	for _, p := range ports {
+	for _, p := range rules.ports {
 		sb.WriteString(p)
 	}
 	sb.WriteRune('\n')
-	for _, r := range rules {
+	for _, r := range rules.rs {
 		sb.WriteString(r.String())
 	}
 	return sb.String()
 }
 
-func (r *Rules)morerules(text string) error {
-	// TODO(PAL): some complicated(?) handling for returning errors early?
-	// The original appears to add them one rule at a time. 
-	return r.readrules("<rules input>", strings.NewReader(text))
+// Read as many full rules as possible, return any remaining text.
+// Full rules are delimited by newlines.
+func (r *Rules) morerules(s []byte, done bool) (remainder []byte, err error) {
+	for {
+		s = []byte(strings.TrimSpace(string(s)))
+		idx := bytes.Index(s, []byte("\n\n"))
+		if idx == -1 {
+			if !done {
+				break
+			}
+			idx = len(s) // Process the trailing bits.
+		}
+		err := r.readrules("<rules input>", bytes.NewReader(s[:idx]))
+		if err != nil {
+			return s, err
+		}
+		if idx+2 > len(s) { // end of input
+			return nil, nil
+		}
+		s = s[idx+2:]
+	}
+	return s, nil
 }
 
+func (fsys *Fsys) writerules(s []byte) (err error) {
+	if s != nil {
+		fsys.text = append(fsys.text, s...)
+	}
+	fsys.text, err = fsys.rules.morerules(fsys.text, s == nil)
+	fsys.rules.makeports()
+	return err
+}

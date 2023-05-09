@@ -3,7 +3,8 @@ package main
 import (
 	"regexp"
 
-	"github.com/paul-lalonde/plumb"
+	"9fans.net/go/plan9"
+	"9fans.net/go/plumb"
 )
 
 type Object int
@@ -42,9 +43,18 @@ type Rule struct {
 	regex *regexp.Regexp
 }
 
-type Rules []*Ruleset
+type Rules struct {
+	rs    []*Ruleset
+	ports []string
+	dir   []*Dirtab
+}
+
 func newRules() Rules {
-	return []*Ruleset{}
+	return Rules{[]*Ruleset{}, []string{},
+		[]*Dirtab{
+			&Dirtab{name: ".", typ: plan9.QTDIR, qid: Qdir, perm: 0o500 | plan9.DMDIR, readq: nil, sendq: nil},
+			&Dirtab{name: "rules", typ: plan9.QTFILE, qid: Qrules, perm: 0o600, readq: nil, sendq: nil},
+			&Dirtab{name: "send", typ: plan9.QTFILE, qid: Qsend, perm: 0o200, readq: nil, sendq: nil}}}
 }
 
 type Ruleset struct {
@@ -54,9 +64,9 @@ type Ruleset struct {
 }
 
 type Exec struct {
-	msg           *plumb.Msg
+	msg           *plumb.Message
 	match         [10]string
-	text		string
+	text          string
 	p0, p1        int
 	clearclick    bool
 	setdata       bool

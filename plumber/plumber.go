@@ -23,16 +23,15 @@ func main() {
 	if err != nil {
 		errorf("can't open rules file %s: %v", plumbfile, err)
 	}
-	
-	rules := newRules()
-	err = rules.readrules(*plumbfile, f)
+
+	fsys := NewFsys()
+	err = fsys.rules.readrules(*plumbfile, f)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	////////
+	fsys.rules.makeports()
 	f.Close()
-	//startfsys(/*rules*/)
-
+	fsys.start()
 }
 
 func errorf(format string, args ...interface{}) {
@@ -72,7 +71,7 @@ func unsharp(s string) string {
 	if s[0:3] == "#9/" {
 		p9 := os.Getenv("PLAN9")
 		if p9 != "" {
-			return filepath.Join(p9, s)
+			return filepath.Join(p9, s[3:])
 		}
 	}
 	return s
